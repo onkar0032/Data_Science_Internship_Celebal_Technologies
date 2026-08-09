@@ -245,9 +245,6 @@ function GeneralCard({ message }: { message: string }) {
 
 // ─── Policy / RAG Card ───────────────────────────────────────────────────────
 function PolicyCard({ data }: { data: RAGData }) {
-  const isVerified = data.is_verified;
-  const isPartial  = data.support_level === 'PARTIALLY_SUPPORTED';
-
   return (
     <div className="space-y-3">
       {/* Header */}
@@ -256,62 +253,12 @@ function PolicyCard({ data }: { data: RAGData }) {
           <BookOpen className="w-4 h-4 text-teal-300" />
         </div>
         <span className="text-sm font-semibold text-white/80">Policy Answer</span>
-        <span className={`ml-auto flex items-center gap-1 text-xs font-medium px-2.5 py-1 rounded-full border ${
-          isVerified
-            ? 'bg-emerald-900/50 border-emerald-700/50 text-emerald-300'
-            : isPartial
-              ? 'bg-amber-900/50 border-amber-700/50 text-amber-300'
-              : 'bg-red-900/50 border-red-700/50 text-red-300'
-        }`}>
-          {isVerified
-            ? <><ShieldCheck className="w-3 h-3 mr-1" />Verified</>
-            : isPartial
-              ? <><ShieldAlert className="w-3 h-3 mr-1" />Partial</>
-              : <><AlertCircle className="w-3 h-3 mr-1" />Unverified</>
-          }
-        </span>
       </div>
 
       {/* Answer text */}
-      <div className={`rounded-2xl p-4 border ${
-        isVerified
-          ? 'bg-teal-950/40 border-teal-800/40'
-          : isPartial
-            ? 'bg-amber-950/40 border-amber-800/40'
-            : 'bg-white/5 border-white/10'
-      }`}>
+      <div className="rounded-2xl p-4 border bg-teal-950/40 border-teal-800/40">
         <p className="text-sm text-white/90 leading-relaxed whitespace-pre-wrap">{data.answer}</p>
       </div>
-
-      {/* Sources */}
-      {data.sources && data.sources.length > 0 && (
-        <div className="space-y-1.5">
-          <p className="text-xs text-white/40 uppercase tracking-wider font-medium">Sources</p>
-          {data.sources.map((src: RAGSource, i: number) => (
-            <div key={`${src.chunk_id}-${i}`} className="flex items-start gap-3 bg-white/5 border border-white/10 rounded-xl p-3">
-              <FileText className="w-4 h-4 text-indigo-400 flex-shrink-0 mt-0.5" />
-              <div>
-                <p className="text-xs font-semibold text-white/80">📄 {src.document_name}</p>
-                <div className="flex flex-wrap items-center gap-x-2 mt-0.5 text-xs text-white/40">
-                  <span>Page {src.page_number}</span>
-                  {src.section && (
-                    <><span>·</span><span>Section: {src.section}</span></>
-                  )}
-                  <span>· {(src.relevance_score * 100).toFixed(0)}% match</span>
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Partial warning */}
-      {isPartial && (
-        <p className="text-xs text-amber-400/70 flex items-center gap-1">
-          <ShieldAlert className="w-3 h-3 flex-shrink-0" />
-          Some parts of this answer may not be fully supported by the indexed documents.
-        </p>
-      )}
     </div>
   );
 }

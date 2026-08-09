@@ -13,13 +13,10 @@ build/
 
 # ── Virtual Environments ──────────────────────────────────────────────────────
 venv/
-venv*/
 env/
 .venv/
 .env/
 ENV/
-venv311/
-venv313/
 
 # ── Environment / Secrets ─────────────────────────────────────────────────────
 .env

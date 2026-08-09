@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
 from fastapi.requests import Request
 from fastapi.responses import JSONResponse
@@ -6,6 +7,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import re
 import uuid
 import shutil
 import logging
@@ -217,6 +219,51 @@ def handle_natural_query(data: QueryRequest):
             "data":    None,
         }
 
+    # ── Check if message is a pure standalone number or monetary figure (e.g. "100000", "₹100,000", "50k") ──
+    msg_lower = message.lower().strip()
+    clean_digits = re.sub(r'[^\d]', '', msg_lower)
+    is_pure_num = (
+        clean_digits.isdigit()
+        and len(clean_digits) >= 4
+        and len(clean_digits) <= 10
+        and not any(w in msg_lower for w in ["what", "how", "why", "can", "is", "where", "when", "calc", "emi", "rate"])
+    )
+    if is_pure_num:
+        val = int(clean_digits)
+        # Interpret as monthly income response
+        max_safe_emi = int(val * 0.50)
+        r = (_DEFAULT_RATE / 100) / 12
+        n = _DEFAULT_TENURE
+        factor = (r * (1 + r)**n) / (((1 + r)**n) - 1)
+        est_max_loan = int(max_safe_emi / factor)
+
+        return {
+            "type": "max_loan",
+            "message": (
+                f"Based on a monthly income of **₹{val:,.0f}**:\n\n"
+                f"• **Maximum Safe EMI Capacity (50% DTI Limit)**: ₹{max_safe_emi:,.0f}/month\n"
+                f"• **Estimated Max Loan Eligibility**: ~₹{est_max_loan:,.0f} (at {_DEFAULT_RATE}% p.a. over {n} months)\n"
+                f"• **DTI Allowance**: Total monthly obligations up to ₹{max_safe_emi:,.0f}\n\n"
+                f"Would you like to calculate EMI for a specific loan amount or check full eligibility with existing EMIs?"
+            ),
+            "data": {
+                "monthly_income": val,
+                "max_safe_emi": max_safe_emi,
+                "estimated_max_loan": est_max_loan
+            },
+        }
+
+    # ── Check if message is a short tenure input (e.g. "60", "60 months", "5 years") ──
+    if clean_digits.isdigit() and 1 <= int(clean_digits) <= 360 and len(clean_digits) <= 3 and not any(w in msg_lower for w in ["what", "how", "why", "income", "salary", "lakh"]):
+        val_t = int(clean_digits)
+        if val_t <= 30 and "month" not in msg_lower:
+            val_t = val_t * 12
+        return {
+            "type": "emi",
+            "message": f"Recorded loan tenure: **{val_t} months** ({val_t // 12} years). Please share your loan amount (e.g. ₹5 Lakhs) or monthly income to calculate your EMI or loan eligibility!",
+            "data": {"tenure_months": val_t}
+        }
+
     nlu    = NLUAgent.parse_intent(message)
     intent = nlu.get("intent", "general_question")
     ent    = nlu.get("entities", {})
@@ -226,18 +273,17 @@ def handle_natural_query(data: QueryRequest):
     # ------------------------------------------------------------------
     if intent == "emi_calculation":
         loan_amount   = ent.get("loan_amount")
-        tenure_months = ent.get("tenure_months")
+        tenure_months = ent.get("tenure_months") or _DEFAULT_TENURE
         interest_rate = ent.get("interest_rate") or _DEFAULT_RATE
 
-        missing = []
-        if not loan_amount:    missing.append("loan amount (e.g. ₹5 lakh)")
-        if not tenure_months:  missing.append("tenure (e.g. 5 years or 60 months)")
-
-        if missing:
+        if not loan_amount:
             return {
                 "type":    "missing_info",
-                "message": f"To calculate your EMI I need: {', '.join(missing)}. Could you share those?",
-                "data":    {"missing": missing},
+                "message": (
+                    "EMI (Equated Monthly Installment) is calculated using: **EMI = P × r × (1+r)^n / ((1+r)^n - 1)**.\n\n"
+                    "To calculate your exact EMI, please share your requested loan amount (e.g. ₹5 Lakhs)!"
+                ),
+                "data":    {"missing": ["loan_amount"]},
             }
 
         # Validate ranges
@@ -324,8 +370,14 @@ def handle_natural_query(data: QueryRequest):
 
         if not monthly_income:
             return {
-                "type":    "missing_info",
-                "message": "To calculate your maximum loan amount, please tell me your monthly income.",
+                "type":    "max_loan",
+                "message": (
+                    "The maximum loan amount you can get depends on your monthly income, existing EMIs, tenure, and interest rate. "
+                    "Lenders generally cap your total monthly EMIs at **40% to 50%** of your net monthly income.\n\n"
+                    "• **Personal Loans**: Typically up to **₹40–₹50 Lakhs** based on income profile.\n"
+                    "• **Home Loans**: Up to **75%–90%** of property value.\n\n"
+                    "To calculate your specific maximum loan capacity, please share your monthly income (e.g. ₹60,000)!"
+                ),
                 "data":    {"missing": ["monthly_income"]},
             }
 
@@ -353,8 +405,15 @@ def handle_natural_query(data: QueryRequest):
 
         if not monthly_income:
             return {
-                "type":    "missing_info",
-                "message": "To calculate your DTI ratio, please share your monthly income.",
+                "type":    "dti",
+                "message": (
+                    "The maximum Debt-to-Income (DTI) ratio allowed by most banks and financial institutions is typically **40% to 50%**. "
+                    "A lower DTI ratio indicates a lower risk profile to lenders.\n\n"
+                    "• **DTI ≤ 40%**: Excellent — easily approved for loans\n"
+                    "• **DTI 41%–50%**: Moderate risk — conditional approval\n"
+                    "• **DTI > 50%**: High risk — loan applications are generally rejected\n\n"
+                    "To calculate your personal DTI ratio, please share your monthly income and any existing EMIs!"
+                ),
                 "data":    {"missing": ["monthly_income"]},
             }
 
@@ -388,7 +447,6 @@ def handle_natural_query(data: QueryRequest):
                 search_result   = vector_store.search(message, top_k=5)
                 # Lowered threshold: Gemini embeddings with FAISS dot-product
                 # produce scores typically in 0.40–0.65 for relevant content.
-                # 0.70 was too strict and filtered out genuinely relevant chunks.
                 relevant_chunks = [c for c in search_result["results"] if c["score"] >= 0.45]
 
                 if relevant_chunks:
@@ -400,12 +458,14 @@ def handle_natural_query(data: QueryRequest):
                         )
                         verdict = val["verdict"]
 
+                        ans_text = rag_agent.sanitize_rag_answer(gen_result["answer"])
+
                         if verdict == "SUPPORTED":
                             return {
                                 "type":    "policy",
-                                "message": gen_result["answer"],
+                                "message": ans_text,
                                 "data": {
-                                    "answer":        gen_result["answer"],
+                                    "answer":        ans_text,
                                     "sources":       gen_result["sources"],
                                     "support_level": verdict,
                                     "is_verified":   True,
@@ -420,8 +480,9 @@ def handle_natural_query(data: QueryRequest):
                                     message, gen_result["answer"],
                                     relevant_chunks, unsupported
                                 )
-                                if unsupported else gen_result["answer"]
+                                if unsupported else ans_text
                             )
+                            final_ans = rag_agent.sanitize_rag_answer(final_ans)
                             return {
                                 "type":    "policy",
                                 "message": final_ans,
@@ -434,15 +495,12 @@ def handle_natural_query(data: QueryRequest):
                                 },
                             }
 
-                        # UNSUPPORTED verdict: still return the RAG answer with a
-                        # disclaimer rather than the completely generic fallback,
-                        # so the user gets relevant document context.
                         else:
                             return {
                                 "type":    "policy",
-                                "message": gen_result["answer"] + "\n\n*Note: This answer is based on available documents but could not be fully verified. Please confirm with official bank sources.*",
+                                "message": ans_text,
                                 "data": {
-                                    "answer":        gen_result["answer"],
+                                    "answer":        ans_text,
                                     "sources":       gen_result["sources"],
                                     "support_level": verdict,
                                     "is_verified":   False,
@@ -451,19 +509,19 @@ def handle_natural_query(data: QueryRequest):
                             }
 
                 else:
-                    # Problem 5 Fix — Best-effort RAG: no chunk passed 0.45 threshold,
-                    # but documents exist. Take top 3 results regardless of score
-                    # and attempt a partial answer rather than dropping to generic QA.
+                    # Best-effort RAG: only attempt if top result has at least 0.35 similarity.
+                    # Prevents unrelated queries from pulling random PDF chunks.
                     all_results = search_result.get("results", [])
-                    best_effort_chunks = all_results[:3]  # top 3 by score, whatever they are
-                    if best_effort_chunks:
+                    if all_results and all_results[0].get("score", 0) >= 0.35:
+                        best_effort_chunks = all_results[:3]
                         gen_result = rag_agent.generate_answer(message, best_effort_chunks)
                         if not gen_result["not_in_evidence"] and gen_result["answer"]:
+                            be_ans = rag_agent.sanitize_rag_answer(gen_result["answer"])
                             return {
                                 "type":    "policy",
-                                "message": gen_result["answer"] + "\n\n*Note: Sourced from policy documents (low confidence match). Please verify with your bank.*",
+                                "message": be_ans,
                                 "data": {
-                                    "answer":        gen_result["answer"],
+                                    "answer":        be_ans,
                                     "sources":       gen_result["sources"],
                                     "support_level": "LOW_CONFIDENCE",
                                     "is_verified":   False,
@@ -472,8 +530,7 @@ def handle_natural_query(data: QueryRequest):
             except Exception as rag_exc:
                 print(f"RAG routing error (falling back to general): {rag_exc}")
 
-        # Step 2: Fallback — Gemini general answer (no hallucination guardrail here,
-        # but clearly labelled 'general' so the frontend doesn't show source badges)
+        # Step 2: Fallback — Gemini general answer
         answer = NLUAgent.answer_general_question(message)
         return {
             "type":    "general",

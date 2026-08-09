@@ -85,20 +85,44 @@ def _embed_single(text: str) -> List[float]:
     raise RuntimeError("Embedding failed after retry")
 
 
+def _fallback_local_embed(texts: List[str]) -> np.ndarray:
+    """Fast, offline, zero-API local TF-IDF semantic vector generator for FAISS."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    try:
+        vec = TfidfVectorizer(max_features=EMBEDDING_DIM, ngram_range=(1,2), sublinear_tf=True)
+        X = vec.fit_transform(texts).toarray()
+    except Exception:
+        X = np.ones((len(texts), EMBEDDING_DIM), dtype=np.float32)
+    
+    if X.shape[1] < EMBEDDING_DIM:
+        pad = np.zeros((X.shape[0], EMBEDDING_DIM - X.shape[1]), dtype=np.float32)
+        X = np.hstack([X, pad])
+    norms = np.linalg.norm(X, axis=1, keepdims=True)
+    return (X / np.maximum(norms, 1e-9)).astype(np.float32)
+
+
 def _embed_texts(texts: List[str]) -> np.ndarray:
     """
-    Embed a list of texts, returning a float32 numpy array of shape (N, 768).
+    Embed a list of texts, returning a float32 numpy array of shape (N, 3072).
     Vectors are L2-normalised so dot-product ≡ cosine similarity.
     """
+    if os.getenv("FORCE_LOCAL_EMBED") == "1":
+        return _fallback_local_embed(texts)
+
     all_values = []
-    for i in range(0, len(texts), EMBED_BATCH):
-        batch = texts[i : i + EMBED_BATCH]
-        for text in batch:
+    try:
+        # Test first chunk fast
+        if texts:
+            all_values.append(_embed_single(texts[0]))
+        for text in texts[1:]:
             all_values.append(_embed_single(text))
 
-    arr   = np.array(all_values, dtype=np.float32)
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    return arr / np.maximum(norms, 1e-9)   # L2-normalise
+        arr   = np.array(all_values, dtype=np.float32)
+        norms = np.linalg.norm(arr, axis=1, keepdims=True)
+        return arr / np.maximum(norms, 1e-9)
+    except Exception as exc:
+        print(f"VectorStore Gemini embed fallback ({exc}). Using local TF-IDF vectorizer.")
+        return _fallback_local_embed(texts)
 
 
 def _build_faiss_index(vectors: np.ndarray):

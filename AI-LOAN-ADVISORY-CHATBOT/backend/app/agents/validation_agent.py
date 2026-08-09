@@ -182,6 +182,9 @@ Respond with ONLY a JSON object, no other text:
     }
 
 
+from app.agents.rag_agent import sanitize_rag_answer
+
+
 def rewrite_for_partial_support(
     question: str,
     answer: str,
@@ -194,8 +197,9 @@ def rewrite_for_partial_support(
 
     Returns the cleaned answer string.
     """
+    clean_orig = sanitize_rag_answer(answer)
     if not unsupported_claims:
-        return answer
+        return clean_orig or answer
 
     evidence_summary = _evidence_summary(chunks)
     claims_block = "\n".join(f"- {c}" for c in unsupported_claims)
@@ -206,6 +210,7 @@ The following answer contains some claims NOT supported by the evidence.
 Rewrite the answer to ONLY include the parts that are supported by the evidence.
 Remove or rephrase any claim listed as unsupported.
 Keep the same tone. Do not add new information.
+Do NOT add meta commentary, thoughts, or leadings like 'formatting clean and precise'.
 
 EVIDENCE:
 {evidence_summary}
@@ -225,11 +230,15 @@ REWRITTEN ANSWER (only supported claims, cite Evidence numbers):"""
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0.0,
-                max_output_tokens=600,
+                max_output_tokens=1500,
             ),
         )
-        return (response.text or answer).strip()
+        raw_rw = (response.text or "").strip()
+        cleaned_rw = sanitize_rag_answer(raw_rw)
+        if len(cleaned_rw) >= 20:
+            return cleaned_rw
+        return clean_orig or answer
     except Exception as api_err:
         print(f"ValidationAgent rewrite Gemini error: {api_err}")
-        return answer  # return original answer unchanged if rewrite fails
+        return clean_orig or answer  # return original sanitized answer if rewrite fails
 

@@ -31,12 +31,12 @@ _INTENT_PROMPT = """You are a JSON-only intent parser for an Indian loan advisor
 Analyse the user message and extract entities.
 
 INTENTS:
-- eligibility_check: Asking about approval chances or status (e.g., "Can I get a loan?", "Will I qualify for 5 lakhs?")
-- emi_calculation: Asking for monthly payment calculations (e.g., "What is the EMI for 2 lakhs over 2 years at 10%?")
-- max_loan_query: Asking for borrowing limit (e.g., "What is the maximum loan I can get with 50k income?")
-- dti_query: Asking about debt-to-income ratio (e.g., "How does my EMI affect my eligibility?", "What is my DTI?")
+- eligibility_check: Asking about approval chances or status with specific personal values (e.g., "Can I get a loan?", "Will I qualify for 5 lakhs with 50k income?")
+- emi_calculation: Asking for monthly payment calculations with specific numbers (e.g., "What is the EMI for 2 lakhs over 2 years at 10%?")
+- max_loan_query: Asking for personal borrowing limit with income (e.g., "What is the maximum loan I can get with 50k income?")
+- dti_query: Asking about personal debt-to-income ratio calculation with personal financial numbers provided.
 - rejection_reason: Asking why a loan was denied or how to improve (e.g., "Why was my loan rejected?", "How to boost my score?")
-- general_question: Any other loan-related topics (e.g., "What documents are required?", "Is Aadhaar mandatory?")
+- general_question: Any general loan-related policy questions, rules, limits, or definitions (e.g., "What is the maximum DTI ratio allowed?", "What documents are required?", "Is Aadhaar mandatory?", "What is DTI?")
 
 EXTRACTION RULES:
 - Convert amounts: "5 lakh" -> 500000, "1 crore" -> 10000000.
@@ -47,7 +47,7 @@ EXTRACTION RULES:
     - existing_emi: Only current debt obligations.
     - loan_amount: Only the principal being requested.
     - If entity is not present, use null.
-- DISAMBIGUATION: If the user says "I earn 50k and pay 10k EMI", 50k is monthly_income and 10k is existing_emi. Do not put them in loan_amount.
+- DISAMBIGUATION: If the user asks general definitions or policy benchmarks (e.g. "What is the maximum DTI ratio allowed?"), classify as general_question.
 
 User message: "{message}"
 
@@ -222,13 +222,8 @@ def answer_general_question(message: str) -> str:
                 "Longer tenure = lower EMI but significantly more total interest paid."
             )
         else:
-            return (
-                "I can help with all loan-related questions! Topics I cover: "
-                "Personal loans, Home loans, Car loans, Gold loans, Education loans, Business/MSME loans, "
-                "CIBIL score, EMI calculation, loan eligibility, documents required, balance transfer, and more. "
-                "Please ask your specific question and I'll help. "
-                "(Note: AI service temporarily unavailable — answers based on standard Indian banking guidelines.)"
-            )
+            from app.agents import rag_agent
+            return rag_agent.format_extracted_policy_answer(message, [])
 
 
 # ---------------------------------------------------------------------------
@@ -242,31 +237,41 @@ def _regex_fallback(message: str) -> dict:
 
     intent = "general_question"
 
-    # ── Check max_loan_query FIRST — before eligibility_check ─────────────────
-    # IMPORTANT: "how much loan can I get?" contains "can i get" which would
-    # wrongly match eligibility_check. Max loan phrases must be checked first.
-    if any(w in msg for w in [
+    # 1. General DTI, product, portal, tax, and rule questions should be general_question
+    if any(phrase in msg for phrase in [
+        "what is the maximum dti", "maximum dti ratio allowed", "max dti allowed",
+        "maximum dti", "what is dti", "define dti", "explain dti", "dti limit", "dti ratio allowed",
+        "vidyalakshmi", "subsidy", "interest subsidy", "who is eligible for", "eligible for interest",
+        "eligible for subsidy", "pm vidyalakshmi"
+    ]):
+        intent = "general_question"
+    # 2. Check max_loan_query FIRST for "how much loan", "how much can i get", "how much loan can i get"
+    elif any(w in msg for w in [
         "how much loan", "how much can i", "maximum loan", "max loan",
         "how much home loan", "how much personal loan", "how much car loan",
         "how much can i borrow", "how much loan can i get", "maximum amount",
-        "how much am i eligible", "what is the maximum", "maximum i can",
-        "how much i can get", "how much i can borrow", "how much loan i can",
+        "how much am i eligible", "maximum i can",
+        "how much i can get", "how much i can borrow", "how much loan i can", "how much loan can"
     ]):
         intent = "max_loan_query"
-    elif any(w in msg for w in [
-        "emi", "monthly payment", "monthly installment", "how much per month",
-        "monthly repayment", "instalment", "per month"
-    ]):
-        intent = "emi_calculation"
+    # 3. Check ELIGIBILITY CHECK for "am i eligible", "qualify", "can i get 5 lakh"
     elif any(w in msg for w in [
         "eligible", "eligibility", "qualify", "can i get", "will i get",
         "approve", "am i eligible", "loan approved"
     ]):
         intent = "eligibility_check"
+    # 4. EMI Calculation
+    elif any(w in msg for w in [
+        "emi", "monthly payment", "monthly installment", "how much per month",
+        "monthly repayment", "instalment", "per month"
+    ]):
+        intent = "emi_calculation"
+    # 5. DTI Query
     elif any(w in msg for w in [
         "dti", "debt to income", "debt-to-income", "ratio", "income ratio"
     ]):
         intent = "dti_query"
+    # 6. Rejection Reason
     elif any(w in msg for w in [
         "rejected", "rejection", "loan rejected", "why denied", "not approved",
         "improve eligibility", "increase eligibility", "improve my score",
@@ -308,23 +313,39 @@ def _extract_entities_regex(message: str) -> dict:
     if m:
         e["interest_rate"] = float(m.group(1))
 
-    # --- Monthly income patterns (must run BEFORE plain rupee fallback) ---
-    m = re.search(
-        r'(?:earn|income|salary|make)[^\d₹]*(?:rs\.?\s*|₹\s*)?([\d,]+)', msg
-    )
-    if m:
-        e["monthly_income"] = int(m.group(1).replace(",", ""))
+    # --- Monthly income with Lakh / K (e.g. "1.5 lakh income", "earn 1.5 lakh", "60k salary") ---
+    m_inc_lakh = re.search(r'(?:earn|income|salary|make)[^\d₹]*([\d.]+)\s*lakh', msg) or re.search(r'([\d.]+)\s*lakh[^\d₹]*(?:income|salary|earn)', msg)
+    if m_inc_lakh:
+        e["monthly_income"] = int(float(m_inc_lakh.group(1)) * 100_000)
 
-    # --- EMI patterns ---
+    m_inc_k = re.search(r'(?:earn|income|salary|make)[^\d₹]*(\d+)\s*k\b', msg) or re.search(r'(\d+)\s*k\b[^\d₹]*(?:income|salary|earn)', msg)
+    if m_inc_k and e["monthly_income"] is None:
+        e["monthly_income"] = int(m_inc_k.group(1)) * 1000
+
+    # Standard Monthly income patterns (number before OR after income/salary/earn)
+    if e["monthly_income"] is None:
+        m = re.search(
+            r'(?:(?:rs\.?\s*|₹\s*)?([\d,]+)\s*(?:per\s*month\s*)?(?:income|salary|earnings?|earn)|(?:earn|income|salary|make)[^\d₹]*(?:rs\.?\s*|₹\s*)?([\d,]+))',
+            msg
+        )
+        if m:
+            raw_val = (m.group(1) or m.group(2)).replace(",", "")
+            if raw_val.isdigit():
+                e["monthly_income"] = int(raw_val)
+
+    # --- EMI patterns (number before OR after EMI) ---
     m = re.search(
-        r'(?:emi|existing emi|current emi|paying|pay)[^\d₹]*(?:rs\.?\s*|₹\s*)?([\d,]+)', msg
+        r'(?:(?:rs\.?\s*|₹\s*)?([\d,]+)\s*(?:existing\s*|current\s*)?emi|(?:emi|existing emi|current emi|paying|pay)[^\d₹]*(?:rs\.?\s*|₹\s*)?([\d,]+))',
+        msg
     )
     if m:
-        e["existing_emi"] = int(m.group(1).replace(",", ""))
+        raw_val = (m.group(1) or m.group(2)).replace(",", "")
+        if raw_val.isdigit():
+            val = int(raw_val)
+            if val != e["monthly_income"]:
+                e["existing_emi"] = val
 
     # --- Plain rupee amounts (fallback, only if no lakh/crore found) ---
-    # BUG FIX: Skip if the same amount was already set as monthly_income.
-    # Prevents "I earn ₹60,000" from setting loan_amount=60000 as well.
     if e["loan_amount"] is None:
         for m in re.finditer(r'(?:rs\.?\s*|₹\s*)([\d,]{4,})', msg):
             val = int(m.group(1).replace(",", ""))
